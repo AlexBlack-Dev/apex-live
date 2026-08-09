@@ -1,133 +1,151 @@
 import Database from "better-sqlite3";
 
-export type Column = "todo" | "doing" | "done";
+export type DriverStateKind = "racing" | "pit";
 
-export const COLUMNS: Column[] = ["todo", "doing", "done"];
-
-export interface Board {
+export interface Driver {
   id: number;
+  number: number;
   name: string;
-  createdAt: number;
+  team: string;
+  baseMs: number;
+  jitterMs: number;
 }
 
-export interface Task {
+export interface Lap {
   id: number;
-  boardId: number;
-  title: string;
-  column: Column;
-  position: number;
-  createdAt: number;
+  driverId: number;
+  lapIndex: number;
+  ms: number;
+  at: number;
 }
+
+export interface RaceEvent {
+  id: number;
+  at: number;
+  kind: "overtake" | "fastest" | "pit" | "flag" | "system";
+  text: string;
+}
+
+export interface SessionConfig {
+  id: number;
+  nominalMs: number;
+  plannedLaps: number;
+  tickMs: number;
+}
+
+const DEFAULT_DRIVERS: ReadonlyArray<readonly [number, string, string, number, number]> = [
+  [11, "V. Reska", "Scuderia Torino", 30500, 260],
+  [7, "A. Kovac", "Nord Motorsport", 30800, 320],
+  [23, "T. Esen", "Lumen Racing", 31100, 290],
+  [5, "R. Okada", "Kita Endurance", 31450, 340],
+  [33, "F. Marchetti", "Rosso Corse", 31900, 310],
+  [96, "M. Solo", "Polar Dynamics", 32400, 360],
+];
 
 export class Store {
   private db: Database.Database;
-  private insertBoard: Database.Statement;
-  private insertTask: Database.Statement;
-  private moveTaskStmt: Database.Statement;
-  private deleteTaskStmt: Database.Statement;
 
   constructor(file = ":memory:") {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS boards (
+      CREATE TABLE IF NOT EXISTS session (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        nominal_ms INTEGER NOT NULL,
+        planned_laps INTEGER NOT NULL,
+        tick_ms INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS drivers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        number INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL,
-        created_at INTEGER NOT NULL
+        team TEXT NOT NULL,
+        base_ms INTEGER NOT NULL,
+        jitter_ms INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS tasks (
+      CREATE TABLE IF NOT EXISTS laps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-        title TEXT NOT NULL,
-        column TEXT NOT NULL CHECK (column IN ('todo','doing','done')),
-        position INTEGER NOT NULL,
-        created_at INTEGER NOT NULL
+        driver_id INTEGER NOT NULL REFERENCES drivers(id),
+        lap_index INTEGER NOT NULL,
+        ms INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        UNIQUE (driver_id, lap_index)
+      );
+      CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL
       );
     `);
-    this.insertBoard = this.db.prepare(
-      "INSERT INTO boards (name, created_at) VALUES (?, ?)"
-    );
-    this.insertTask = this.db.prepare(`
-      INSERT INTO tasks (board_id, title, column, position, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    this.moveTaskStmt = this.db.prepare(`
-      UPDATE tasks SET column = ?,
-        position = (
-          SELECT COALESCE(MAX(t2.position), 0) + 1
-          FROM tasks t2
-          WHERE t2.board_id = tasks.board_id AND t2.column = ?
-        )
-      WHERE id = ?
-    `);
-    this.deleteTaskStmt = this.db.prepare("DELETE FROM tasks WHERE id = ?");
+    this.seed();
   }
 
-  createBoard(name: string): Board {
-    const info = this.insertBoard.run(name, Date.now());
-    const board = this.getBoard(Number(info.lastInsertRowid));
-    if (!board) throw new Error("board not found after insert");
-    return board;
+  private seed(): void {
+    const count = this.db.prepare("SELECT COUNT(*) AS n FROM drivers").get() as { n: number };
+    if (count.n === 0) {
+      const insert = this.db.prepare(
+        "INSERT INTO drivers (number, name, team, base_ms, jitter_ms) VALUES (?, ?, ?, ?, ?)"
+      );
+      for (const [number, name, team, baseMs, jitterMs] of DEFAULT_DRIVERS) {
+        insert.run(number, name, team, baseMs, jitterMs);
+      }
+    }
+    const has = this.db.prepare("SELECT id FROM session WHERE id = 1").get();
+    if (!has) {
+      this.db
+        .prepare("INSERT INTO session (id, nominal_ms, planned_laps, tick_ms) VALUES (1, ?, ?, ?)")
+        .run(30500, 10, 500);
+    }
   }
 
-  listBoards(): Board[] {
+  getConfig(): SessionConfig {
+    const row = this.db
+      .prepare("SELECT id, nominal_ms AS nominalMs, planned_laps AS plannedLaps, tick_ms AS tickMs FROM session WHERE id = 1")
+      .get() as SessionConfig;
+    return row;
+  }
+
+  updateConfig(nominalMs: number, plannedLaps: number, tickMs: number): void {
+    this.db
+      .prepare("UPDATE session SET nominal_ms = ?, planned_laps = ?, tick_ms = ? WHERE id = 1")
+      .run(nominalMs, plannedLaps, tickMs);
+  }
+
+  listDrivers(): Driver[] {
     return this.db
-      .prepare("SELECT id, name, created_at AS createdAt FROM boards ORDER BY id DESC")
-      .all() as Board[];
+      .prepare("SELECT id, number, name, team, base_ms AS baseMs, jitter_ms AS jitterMs FROM drivers ORDER BY base_ms ASC")
+      .all() as Driver[];
   }
 
-  getBoard(id: number): Board | null {
-    const row = this.db
-      .prepare("SELECT id, name, created_at AS createdAt FROM boards WHERE id = ?")
-      .get(id) as Board | undefined;
-    return row ?? null;
-  }
-
-  addTask(boardId: number, title: string, column: Column): Task | null {
-    if (!this.getBoard(boardId)) return null;
-    const position = (this.countByColumn(boardId, column) + 1) * 1000;
-    const info = this.insertTask.run(boardId, title.trim(), column, position, Date.now());
-    const task = this.getTask(Number(info.lastInsertRowid));
-    return task;
-  }
-
-  getTask(id: number): Task | null {
-    const row = this.db
-      .prepare(`
-        SELECT id, board_id AS boardId, title, column, position, created_at AS createdAt
-        FROM tasks WHERE id = ?
-      `)
-      .get(id) as Task | undefined;
-    return row ?? null;
-  }
-
-  listTasks(boardId: number): Task[] {
+  listLaps(): Lap[] {
     return this.db
-      .prepare(`
-        SELECT id, board_id AS boardId, title, column, position, created_at AS createdAt
-        FROM tasks WHERE board_id = ?
-        ORDER BY position ASC, id ASC
-      `)
-      .all(boardId) as Task[];
+      .prepare("SELECT id, driver_id AS driverId, lap_index AS lapIndex, ms, at FROM laps ORDER BY id ASC")
+      .all() as Lap[];
   }
 
-  moveTask(taskId: number, column: Column): Task | null {
-    const info = this.moveTaskStmt.run(column, column, taskId);
-    if (info.changes === 0) return null;
-    return this.getTask(taskId);
+  addLap(driverId: number, lapIndex: number, ms: number, at: number): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO laps (driver_id, lap_index, ms, at) VALUES (?, ?, ?, ?)")
+      .run(driverId, lapIndex, ms, at);
   }
 
-  deleteTask(taskId: number): boolean {
-    return this.deleteTaskStmt.run(taskId).changes > 0;
+  clearLaps(): void {
+    this.db.prepare("DELETE FROM laps").run();
   }
 
-  private countByColumn(boardId: number, column: Column): number {
-    const row = this.db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM tasks WHERE board_id = ? AND column = ?"
-      )
-      .get(boardId, column) as { n: number };
-    return row.n;
+  listEvents(afterId = 0): RaceEvent[] {
+    return this.db
+      .prepare("SELECT id, at, kind, text FROM events WHERE id > ? ORDER BY id ASC")
+      .all(afterId) as RaceEvent[];
+  }
+
+  addEvent(kind: RaceEvent["kind"], text: string, at: number): void {
+    this.db.prepare("INSERT INTO events (at, kind, text) VALUES (?, ?, ?)").run(at, kind, text);
+  }
+
+  clearEvents(): void {
+    this.db.prepare("DELETE FROM events").run();
   }
 
   close(): void {

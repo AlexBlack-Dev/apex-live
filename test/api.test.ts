@@ -1,16 +1,24 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { Store } from "../src/db";
+import { RaceRunner } from "../src/sim";
 import { createApp, ServerHandle } from "../src/server";
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 let db: Store;
+let runner: RaceRunner;
 let handle: ServerHandle;
 let base: string;
 
 beforeAll(async () => {
+  process.env.RACE_NOMINAL_MS = "900";
+  process.env.RACE_TICK_MS = "100";
+  process.env.RACE_LAPS = "12";
   db = new Store();
-  handle = createApp(db, { port: 0 });
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  runner = new RaceRunner(db);
+  handle = createApp(db, runner, { port: 0 });
+  await sleep(300);
   base = `http://127.0.0.1:${handle.port}/api`;
 });
 
@@ -20,157 +28,120 @@ afterAll(async () => {
 });
 
 describe("REST API", () => {
-  it("lists boards (initially empty)", async () => {
-    const response = await fetch(`${base}/boards`);
+  it("returns a session snapshot", async () => {
+    const response = await fetch(`${base}/session`);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ boards: [] });
+    const body = (await response.json()) as {
+      race: { session: { running: boolean; plannedLaps: number }; standings: unknown[]; drivers: unknown[] };
+    };
+    expect(body.race.session.running).toBe(false);
+    expect(body.race.standings).toHaveLength(6);
+    expect(body.race.drivers).toHaveLength(6);
   });
 
-  it("creates a board and rejects empty names", async () => {
-    const bad = await fetch(`${base}/boards`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "   " }),
-    });
-    expect(bad.status).toBe(400);
-
-    const good = await fetch(`${base}/boards`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Sprint 42" }),
-    });
-    expect(good.status).toBe(201);
-    const body = (await good.json()) as { board: { id: number; name: string } };
-    expect(body.board.name).toBe("Sprint 42");
+  it("lists drivers and laps", async () => {
+    const drivers = await (await fetch(`${base}/drivers`)).json() as { drivers: Array<{ number: number }> };
+    expect(drivers.drivers).toHaveLength(6);
+    const laps = await (await fetch(`${base}/laps`)).json() as { laps: unknown[] };
+    expect(laps.laps).toEqual([]);
   });
 
-  it("fails on malformed json", async () => {
-    const response = await fetch(`${base}/boards`, {
+  it("rejects unknown control actions", async () => {
+    const response = await fetch(`${base}/control`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{not json",
+      body: JSON.stringify({ action: "launch" }),
     });
     expect(response.status).toBe(400);
   });
 
-  it("adds and lists tasks for a board", async () => {
-    const boards = await (await fetch(`${base}/boards`)).json() as {
-      boards: Array<{ id: number }>;
-    };
-    const boardId = boards.boards[0]!.id;
-
-    const created = await fetch(`${base}/boards/${boardId}/tasks`, {
+  it("start runs and pause freezes the race via HTTP control", async () => {
+    const started = await fetch(`${base}/control`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "First task" }),
+      body: JSON.stringify({ action: "start" }),
     });
-    expect(created.status).toBe(201);
+    expect(started.status).toBe(200);
+    const running = (await started.json()) as { race: { session: { running: boolean } } };
+    expect(running.race.session.running).toBe(true);
+    await sleep(2200);
+    const mid = await (await fetch(`${base}/laps`)).json() as { laps: unknown[] };
+    expect(mid.laps.length).toBeGreaterThan(0);
 
-    const detail = await (await fetch(`${base}/boards/${boardId}`)).json() as {
-      board: { id: number };
-      tasks: Array<{ title: string }>;
-    };
-    expect(detail.board.id).toBe(boardId);
-    expect(detail.tasks).toHaveLength(1);
-    expect(detail.tasks[0]!.title).toBe("First task");
+    const paused = await fetch(`${base}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "pause" }),
+    });
+    const frozen = (await paused.json()) as { race: { session: { running: boolean } } };
+    expect(frozen.race.session.running).toBe(false);
   });
 
-  it("moves a task between columns", async () => {
-    const boards = await (await fetch(`${base}/boards`)).json() as {
-      boards: Array<{ id: number }>;
-    };
-    const boardId = boards.boards[0]!.id;
-    const detail = await (await fetch(`${base}/boards/${boardId}`)).json() as {
-      tasks: Array<{ id: number }>;
-    };
-    const taskId = detail.tasks[0]!.id;
-
-    const moved = await fetch(`${base}/tasks/${taskId}/move`, {
+  it("reset clears laps and events cursor works after racing", async () => {
+    const response = await fetch(`${base}/control`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ column: "done" }),
+      body: JSON.stringify({ action: "reset" }),
     });
-    expect(moved.status).toBe(200);
-    const body = (await moved.json()) as { task: { column: string } };
-    expect(body.task.column).toBe("done");
-  });
+    expect(response.status).toBe(200);
+    const laps = await (await fetch(`${base}/laps`)).json() as { laps: unknown[] };
+    expect(laps.laps).toEqual([]);
 
-  it("returns 404 for unknown resources", async () => {
-    const board = await fetch(`${base}/boards/4242`);
-    expect(board.status).toBe(404);
-    const task = await fetch(`${base}/tasks/4242/move`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ column: "todo" }),
-    });
-    expect(task.status).toBe(404);
-  });
-
-  it("deletes a task", async () => {
-    const boards = await (await fetch(`${base}/boards`)).json() as {
-      boards: Array<{ id: number }>;
+    const events = await (await fetch(`${base}/events`)).json() as {
+      events: Array<{ id: number; text: string }>;
     };
-    const boardId = boards.boards[0]!.id;
-    const created = await fetch(`${base}/boards/${boardId}/tasks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "To delete" }),
-    });
-    const { task } = (await created.json()) as { task: { id: number } };
-
-    const removed = await fetch(`${base}/tasks/${task.id}`, { method: "DELETE" });
-    expect(removed.status).toBe(200);
-    const again = await fetch(`${base}/tasks/${task.id}`, { method: "DELETE" });
-    expect(again.status).toBe(404);
+    expect(events.events.length).toBeGreaterThan(0);
+    const lastId = events.events[events.events.length - 1]!.id;
+    const rest = await (await fetch(`${base}/events?after=${lastId}`)).json() as { events: unknown[] };
+    expect(rest.events).toHaveLength(0);
   });
 });
 
 describe("WebSocket broadcast", () => {
-  it("receives board-updated after a task change", async () => {
-    const boards = await (await fetch(`${base}/boards`)).json() as {
-      boards: Array<{ id: number }>;
-    };
-    const boardId = boards.boards[0]!.id;
-
+  it("pushes an initial race snapshot on connect", async () => {
     const socket = new WebSocket(`ws://127.0.0.1:${handle.port}/ws`);
-    const opened = new Promise<void>((resolve) => socket.once("open", resolve));
-    await opened;
-
-    const message = new Promise<{ type: string; boardId: number }>((resolve) =>
+    const first = new Promise<{ type: string; snapshot?: unknown }>((resolve) =>
       socket.once("message", (data) => resolve(JSON.parse(data.toString()) as never))
     );
+    const message = await first;
+    expect(message.type).toBe("race");
+    expect(message.snapshot).toBeDefined();
+    socket.close();
+  });
 
-    await fetch(`${base}/boards/${boardId}/tasks`, {
+  it("streams race ticks while the race runs", async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${handle.port}/ws`);
+    await new Promise<void>((resolve) => socket.once("open", resolve));
+    await fetch(`${base}/control`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Broadcast me", column: "doing" }),
+      body: JSON.stringify({ action: "start" }),
     });
-
-    const event = await message;
-    expect(event.type).toBe("board-updated");
-    expect(event.boardId).toBe(boardId);
+    let ticks = 0;
+    const sawTick = new Promise<void>((resolve) => {
+      socket.on("message", () => {
+        ticks += 1;
+        if (ticks >= 4) resolve();
+      });
+    });
+    await sawTick;
+    expect(ticks).toBeGreaterThanOrEqual(4);
     socket.close();
+    await fetch(`${base}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reset" }),
+    });
   });
 
   it("replies pong to ping", async () => {
     const socket = new WebSocket(`ws://127.0.0.1:${handle.port}/ws`);
     await new Promise<void>((resolve) => socket.once("open", resolve));
-    const pong = new Promise<{ type: string }>((resolve) =>
-      socket.once("message", (data) => resolve(JSON.parse(data.toString()) as never))
-    );
     socket.send(JSON.stringify({ type: "ping" }));
-    expect((await pong).type).toBe("pong");
-    socket.close();
-  });
-
-  it("replies error to an invalid message", async () => {
-    const socket = new WebSocket(`ws://127.0.0.1:${handle.port}/ws`);
-    await new Promise<void>((resolve) => socket.once("open", resolve));
-    const reply = new Promise<{ type: string }>((resolve) =>
+    const reply = await new Promise<{ type: string }>((resolve) =>
       socket.once("message", (data) => resolve(JSON.parse(data.toString()) as never))
     );
-    socket.send("garbage");
-    expect((await reply).type).toBe("error");
+    expect(reply.type).toBe("pong");
     socket.close();
   });
 });

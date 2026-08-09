@@ -5,71 +5,59 @@ import path from "node:path";
 import { Store } from "../src/db";
 
 describe("Store (SQLite)", () => {
-  it("creates and lists boards", () => {
+  it("seeds six drivers ordered by pace", () => {
     const store = new Store();
-    const board = store.createBoard("Alpha");
-    expect(board.id).toBeGreaterThan(0);
-    expect(board.name).toBe("Alpha");
-    expect(store.listBoards()).toHaveLength(1);
+    const drivers = store.listDrivers();
+    expect(drivers).toHaveLength(6);
+    expect(drivers[0]!.baseMs).toBeLessThan(drivers[drivers.length - 1]!.baseMs);
     store.close();
   });
 
-  it("adds tasks with per-column positions", () => {
+  it("reads a session config", () => {
     const store = new Store();
-    const board = store.createBoard("Beta");
-    const first = store.addTask(board.id, "one", "todo");
-    const second = store.addTask(board.id, "two", "todo");
-    const parked = store.addTask(board.id, "three", "done");
-    expect(first?.position).toBe(1000);
-    expect(second?.position).toBe(2000);
-    expect(parked?.column).toBe("done");
-    expect(store.listTasks(board.id)).toHaveLength(3);
+    const config = store.getConfig();
+    expect(config.plannedLaps).toBeGreaterThan(0);
+    expect(config.nominalMs).toBeGreaterThan(0);
     store.close();
   });
 
-  it("rejects tasks for missing boards and empty titles", () => {
+  it("appends laps once per driver per lap index", () => {
     const store = new Store();
-    expect(store.addTask(999, "ghost", "todo")).toBeNull();
-    expect(store.addTask(1, "", "todo")).toBeNull();
+    const driverId = store.listDrivers()[0]!.id;
+    store.addLap(driverId, 1, 30100, 1);
+    store.addLap(driverId, 1, 99999, 2);
+    store.addLap(driverId, 2, 29800, 3);
+    expect(store.listLaps()).toHaveLength(2);
+    expect(store.listLaps()[0]!.ms).toBe(30100);
     store.close();
   });
 
-  it("moves tasks between columns in FIFO order", () => {
+  it("orders events by id and filters after a cursor", () => {
     const store = new Store();
-    const board = store.createBoard("Gamma");
-    const a = store.addTask(board.id, "a", "todo");
-    const b = store.addTask(board.id, "b", "todo");
-    const moved = store.moveTask(a!.id, "doing");
-    expect(moved?.column).toBe("doing");
-    const list = store.listTasks(board.id);
-    const movedAgain = store.moveTask(b!.id, "doing");
-    expect(movedAgain?.position).toBeGreaterThan(moved?.position ?? 0);
-    expect(list).toHaveLength(2);
-    store.close();
-  });
-
-  it("deletes tasks", () => {
-    const store = new Store();
-    const board = store.createBoard("Delta");
-    const task = store.addTask(board.id, "doomed", "doing");
-    expect(store.deleteTask(task!.id)).toBe(true);
-    expect(store.deleteTask(task!.id)).toBe(false);
-    expect(store.listTasks(board.id)).toHaveLength(0);
+    store.addEvent("system", "first", 1);
+    store.addEvent("overtake", "second", 2);
+    store.addEvent("flag", "third", 3);
+    const all = store.listEvents();
+    expect(all.map((e) => e.kind)).toEqual(["system", "overtake", "flag"]);
+    const after = store.listEvents(all[1]!.id);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.text).toBe("third");
     store.close();
   });
 
   it("persists to a file and reloads", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "taskboard-"));
-    const file = path.join(dir, "board.db");
+    const dir = mkdtempSync(path.join(tmpdir(), "apex-"));
+    const file = path.join(dir, "race.db");
     try {
       const first = new Store(file);
-      const board = first.createBoard("Persistent");
-      first.addTask(board.id, "survives", "todo");
+      const driverId = first.listDrivers()[0]!.id;
+      first.addLap(driverId, 1, 30500, 42);
+      first.addEvent("fastest", "hot lap", 42);
       first.close();
 
       const second = new Store(file);
-      expect(second.listBoards()[0]?.name).toBe("Persistent");
-      expect(second.listTasks(board.id)[0]?.title).toBe("survives");
+      expect(second.listLaps()).toHaveLength(1);
+      expect(second.listEvents()[0]!.text).toBe("hot lap");
       second.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

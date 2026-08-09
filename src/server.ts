@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
-import { Store, COLUMNS, Column } from "./db.js";
+import { Store } from "./db.js";
+import { RaceRunner } from "./sim.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -49,13 +50,7 @@ function readBody(req: http.IncomingMessage, maxBytes = 1_000_000): Promise<Json
 function getId(raw: string | undefined): number | null {
   if (!raw) return null;
   const id = Number(raw);
-  return Number.isInteger(id) && id > 0 ? id : null;
-}
-
-function parseColumn(value: unknown): Column | null {
-  return typeof value === "string" && COLUMNS.includes(value as Column)
-    ? (value as Column)
-    : null;
+  return Number.isInteger(id) && id >= 0 ? id : null;
 }
 
 const MIME: Record<string, string> = {
@@ -74,12 +69,12 @@ export interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle {
+export function createApp(db: Store, runner: RaceRunner, opts: { port?: number } = {}): ServerHandle {
   const bound = { port: opts.port ?? 0 };
   const clients = new Set<WebSocket>();
 
-  const broadcast = (boardId: number): void => {
-    const message = JSON.stringify({ type: "board-updated", boardId });
+  const broadcast = (): void => {
+    const message = JSON.stringify({ type: "race", snapshot: runner.snapshot() });
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) client.send(message);
     }
@@ -91,7 +86,7 @@ export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle
         serveStatic(res, "/index.html");
         return;
       }
-      if (req.method === "GET" && req.url?.startsWith("/assets/")) {
+      if (req.method === "GET" && (req.url?.startsWith("/assets/") || req.url?.startsWith("/fonts/"))) {
         serveStatic(res, req.url);
         return;
       }
@@ -99,7 +94,7 @@ export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle
         sendJson(res, 404, { error: "not found" });
         return;
       }
-      await routeApi(req, res, db, broadcast);
+      await routeApi(req, res, db, runner, broadcast);
     } catch (error) {
       const message = error instanceof Error ? error.message : "server error";
       sendJson(res, 400, { error: message });
@@ -109,6 +104,7 @@ export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle
   const wss = new WebSocketServer({ server });
   wss.on("connection", (socket) => {
     clients.add(socket);
+    socket.send(JSON.stringify({ type: "race", snapshot: runner.snapshot() }));
     socket.on("message", (raw) => {
       try {
         const message = JSON.parse(raw.toString("utf8")) as JsonBody;
@@ -125,6 +121,10 @@ export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle
     socket.on("error", () => clients.delete(socket));
   });
 
+  const tick = setInterval(() => {
+    if (runner.isRunning()) broadcast();
+  }, db.getConfig().tickMs);
+
   server.listen(bound.port, "127.0.0.1", () => {
     const address = server.address();
     if (address && typeof address === "object") bound.port = address.port;
@@ -136,6 +136,8 @@ export function createApp(db: Store, opts: { port?: number } = {}): ServerHandle
     },
     close: () =>
       new Promise<void>((resolve) => {
+        clearInterval(tick);
+        runner.close();
         for (const client of clients) client.terminate();
         wss.close();
         server.close(() => resolve());
@@ -149,136 +151,46 @@ async function routeApi(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   db: Store,
-  broadcast: (boardId: number) => void
+  runner: RaceRunner,
+  broadcast: () => void
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const parts = url.pathname.split("/").filter(Boolean);
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "boards" && parts.length === 2) {
-    sendJson(res, 200, { boards: db.listBoards() });
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "session" && parts.length === 2) {
+    sendJson(res, 200, { race: runner.snapshot() });
     return;
   }
 
-  if (req.method === "POST" && parts[0] === "api" && parts[1] === "boards" && parts.length === 2) {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "drivers" && parts.length === 2) {
+    sendJson(res, 200, { drivers: db.listDrivers() });
+    return;
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "laps" && parts.length === 2) {
+    const laps = db.listLaps();
+    sendJson(res, 200, { laps });
+    return;
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "events" && parts.length === 2) {
+    const after = getId(url.searchParams.get("after") ?? undefined);
+    sendJson(res, 200, { events: after === null ? db.listEvents() : db.listEvents(after) });
+    return;
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "control" && parts.length === 2) {
     const body = await readBody(req);
-    const name =
-      typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 80) : null;
-    if (!name) {
-      sendJson(res, 400, { error: "name is required" });
+    const action = body.action;
+    if (action === "start") runner.start();
+    else if (action === "pause") runner.pause();
+    else if (action === "reset") runner.reset();
+    else {
+      sendJson(res, 400, { error: "action must be start|pause|reset" });
       return;
     }
-    sendJson(res, 201, { board: db.createBoard(name) });
-    return;
-  }
-
-  if (
-    req.method === "POST" &&
-    parts[0] === "api" &&
-    parts[1] === "boards" &&
-    parts[2] &&
-    parts[3] === "reset"
-  ) {
-    const boardId = getId(parts[2]);
-    if (!boardId) {
-      sendJson(res, 400, { error: "invalid board id" });
-      return;
-    }
-    for (const task of db.listTasks(boardId)) db.deleteTask(task.id);
-    const seed: ReadonlyArray<readonly [Column, string]> = [
-      ["todo", "Design the WebSocket protocol"],
-      ["todo", "Write SQLite migration"],
-      ["todo", "Add optimistic move rollback"],
-      ["doing", "Build kanban columns UI"],
-      ["doing", "Wire real-time events to store"],
-      ["done", "Scaffold React + Vite"],
-      ["done", "Set up CI pipeline"],
-    ];
-    for (const [column, title] of seed) {
-      db.addTask(boardId, title, column);
-    }
-    broadcast(boardId);
-    sendJson(res, 200, { ok: true, board: db.getBoard(boardId) });
-    return;
-  }
-
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "boards" && parts.length === 3) {
-    const boardId = getId(parts[2]);
-    if (boardId === null) {
-      sendJson(res, 400, { error: "invalid board id" });
-      return;
-    }
-    const board = db.getBoard(boardId);
-    if (!board) {
-      sendJson(res, 404, { error: "board not found" });
-      return;
-    }
-    sendJson(res, 200, { board, tasks: db.listTasks(boardId) });
-    return;
-  }
-
-  if (
-    req.method === "POST" &&
-    parts[0] === "api" &&
-    parts[1] === "boards" &&
-    parts.length === 4 &&
-    parts[3] === "tasks"
-  ) {
-    const boardId = getId(parts[2]);
-    const body = await readBody(req);
-    const title =
-      typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : null;
-    const column = parseColumn(body.column) ?? "todo";
-    if (!boardId || !title) {
-      sendJson(res, 400, { error: "boardId and title are required" });
-      return;
-    }
-    const task = db.addTask(boardId, title, column);
-    if (!task) {
-      sendJson(res, 404, { error: "board not found" });
-      return;
-    }
-    broadcast(boardId);
-    sendJson(res, 201, { task });
-    return;
-  }
-
-  if (
-    req.method === "POST" &&
-    parts[0] === "api" &&
-    parts[1] === "tasks" &&
-    parts.length === 4 &&
-    parts[3] === "move"
-  ) {
-    const taskId = getId(parts[2]);
-    const body = await readBody(req);
-    const column = parseColumn(body.column);
-    if (!taskId || !column) {
-      sendJson(res, 400, { error: "taskId and column are required" });
-      return;
-    }
-    const task = db.moveTask(taskId, column);
-    if (!task) {
-      sendJson(res, 404, { error: "task not found" });
-      return;
-    }
-    broadcast(task.boardId);
-    sendJson(res, 200, { task });
-    return;
-  }
-
-  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "tasks" && parts.length === 3) {
-    const taskId = getId(parts[2]);
-    if (!taskId) {
-      sendJson(res, 400, { error: "invalid task id" });
-      return;
-    }
-    const task = db.getTask(taskId);
-    if (!db.deleteTask(taskId)) {
-      sendJson(res, 404, { error: "task not found" });
-      return;
-    }
-    if (task) broadcast(task.boardId);
-    sendJson(res, 200, { ok: true });
+    broadcast();
+    sendJson(res, 200, { race: runner.snapshot() });
     return;
   }
 
@@ -309,6 +221,7 @@ function serveStatic(res: http.ServerResponse, requestPath: string): void {
     res.writeHead(200, {
       "Content-Type": MIME[ext] ?? "application/octet-stream",
       "Content-Length": data.length,
+      "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
     });
     res.end(data);
   });
