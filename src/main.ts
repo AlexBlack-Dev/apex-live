@@ -22,7 +22,7 @@ function bootBanner(port: number, dbFile: string): string {
     return `│ ${left}${" ".repeat(Math.max(pad, 1))}${right} │`;
   };
   const rows = [
-    cell(`${ACC("APEX ▸ LIVE RACING TERMINAL")}`, RED("LIVE")),
+    cell(`${ACC("REDLINE ▸ LIVE RACING TERMINAL")}`, RED("LIVE")),
     cell(`${DIM("real-time broadcast · react 19 + node + websocket + sqlite")}`),
     sep,
     cell("http", ACC(`http://127.0.0.1:${port}`)),
@@ -39,7 +39,7 @@ function bootBanner(port: number, dbFile: string): string {
 
 async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 3004);
-  const dbFile = process.env.DB_FILE ?? path.join(__dirname, "..", "data", "apex.db");
+  const dbFile = process.env.DB_FILE ?? path.join(__dirname, "..", "data", "redline.db");
   const autostart = process.argv.includes("--start");
 
   if (!dbFile.includes(":memory:")) {

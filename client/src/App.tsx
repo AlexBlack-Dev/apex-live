@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Driver, EventKind, LiveDriver, RaceEvent, RaceSnapshot } from "./types";
 
-const REPO_URL = "https://github.com/AlexBlack-Dev/apex-live";
+const REPO_URL = "https://github.com/AlexBlack-Dev/redline";
 
 interface WsState {
   kind: "connecting" | "online" | "offline";
@@ -112,6 +112,22 @@ function MetricTile(props: { label: string; value: string; right?: string }): Re
   );
 }
 
+function CarMark(props: { className: string }): React.ReactElement {
+  const { className } = props;
+  return (
+    <g className={className}>
+      <rect x="0.6" y="1.0" width="2.0" height="4.5" />
+      <rect x="13.3" y="1.15" width="1.25" height="4.2" />
+      <rect x="2.3" y="0.7" width="1.3" height="0.6" />
+      <rect x="2.3" y="5.2" width="1.3" height="0.6" />
+      <rect x="12.6" y="0.9" width="1.3" height="0.55" />
+      <rect x="12.6" y="5.05" width="1.3" height="0.55" />
+      <path d="M1.6 1.55 Q7 0.7 11.9 1.85 Q13.4 2.25 13.8 2.7 L13.8 3.8 Q13.4 4.25 11.9 4.65 Q7 5.8 1.6 4.95 Q0.8 4.75 0.8 3.25 Q0.8 1.75 1.6 1.55 Z" />
+      <rect className="graph-car-cockpit" x="5.9" y="2.15" width="4.6" height="2.2" />
+    </g>
+  );
+}
+
 function RaceGraph(props: {
   points: Map<number, { lap: number; pos: number }[]>;
   drivers: Driver[];
@@ -139,7 +155,7 @@ function RaceGraph(props: {
   }
 
   return (
-    <svg className="race-graph" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="race position history">
+    <svg className="race-graph" viewBox={`0 0 ${W} ${H}`} aria-label="race position history">
       {gridLines}
       {drivers.map((driver) => {
         const pts = points.get(driver.id) ?? [];
@@ -148,11 +164,19 @@ function RaceGraph(props: {
           .map((p, i) => `${i === 0 ? "M" : "L"}${x(p.lap).toFixed(1)},${y(p.pos).toFixed(1)}`)
           .join(" ");
         const last = pts[pts.length - 1]!;
+        const prev = pts[pts.length - 2]!;
+        const cx = x(last.lap);
+        const cy = y(last.pos);
+        const dx = cx - x(prev.lap);
+        const dy = cy - y(prev.pos);
+        const angle = Math.atan2(dy, dx) * (180 / Math.PI);
         const isLeader = driver.id === leaderId;
         return (
           <g key={driver.id}>
             <path d={path} className={`graph-line${isLeader ? " graph-lead" : ""}`} />
-            <circle cx={x(last.lap)} cy={y(last.pos)} r={isLeader ? 4 : 2.5} className={isLeader ? "graph-dot-lead" : "graph-dot"} />
+            <g transform={`translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${angle.toFixed(1)} 7.5 3.25)`}>
+              <CarMark className={isLeader ? "graph-car-lead" : "graph-car"} />
+            </g>
           </g>
         );
       })}
@@ -289,12 +313,12 @@ export default function App(): React.ReactElement {
     <div className="app">
       <div className="grain" aria-hidden="true" />
       <div className="wordmark-bg" aria-hidden="true">
-        APEX
+        REDLINE
       </div>
 
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">APEX</span>
+          <span className="brand-mark">REDLINE</span>
           <span className="brand-sub">
             <i>live racing terminal</i>
           </span>
@@ -438,7 +462,7 @@ export default function App(): React.ReactElement {
       <Ticker events={snapshot?.events ?? []} />
 
       <footer className="app-foot">
-        <span>APEX · live racing terminal — react 19 · node.js · websocket · sqlite</span>
+        <span>REDLINE · live racing terminal — react 19 · node.js · websocket · sqlite</span>
         <span className="foot-right">tyre window P2–P6 · 10 laps · broadcast every 500 ms</span>
       </footer>
     </div>

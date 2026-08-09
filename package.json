@@ -1,9 +1,9 @@
 {
-    "name":  "taskboard",
+    "name":  "redline",
     "version":  "1.0.0",
     "type":  "module",
     "private":  true,
-    "description":  "Real-time kanban board — React 19 + Node.js + WebSocket + SQLite",
+    "description":  "REDLINE — real-time racing broadcast platform: pace simulator, live timing, WebSocket push, SQLite race recorder",
     "license":  "MIT",
     "scripts":  {
                     "dev":  "tsx watch src/main.ts",

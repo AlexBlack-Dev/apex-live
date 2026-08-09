@@ -1,10 +1,10 @@
-# APEX — Live Racing Terminal
+# REDLINE — Live Racing Terminal
 
 Real-time race broadcasting platform: a live timing screen for motorsport
 with position battles, fastest laps, pit windows and a rolling event ticker —
 pushed to every connected client over WebSocket.
 
-[![CI](https://github.com/AlexBlack-Dev/apex-live/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexBlack-Dev/apex-live/actions/workflows/ci.yml)
+[![CI](https://github.com/AlexBlack-Dev/redline/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexBlack-Dev/redline/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Stack
@@ -76,9 +76,9 @@ Design decisions:
   pure projection of the store, which makes replay/audit trivial.
 - **Plain-Node http core** — no framework dependency; routing is explicit and
   covered by tests.
-- **Self-hosted type** — Archivo Expanded, IBM Plex Mono and Instrument Serif
-  (all OFL) ship as `woff2` in the client; the terminal renders identically
-  offline, fonts and license files included in the repository.
+- **Self-hosted type** — Teko (racing display), IBM Plex Mono and Instrument
+  Serif (all OFL) ship as `woff2` in the client; the terminal renders
+  identically offline, fonts and license files included in the repository.
 
 ## Tests
 
@@ -91,8 +91,9 @@ CI runs typecheck → tests → production build on Node 22.
 
 ## Typography & palette
 
-Display: Archivo Expanded 125 (900, tight tracking) · Data: IBM Plex Mono
-tabular · Embellishment: Instrument Serif italic · Accent: racing lime
-`#CFFF04` on ink `#07080A`, paper `#F3F1EC`, alert red `#FF2E1F`.
+Display: Teko (condensed racing face, 700/900, tight tracking) · Data:
+IBM Plex Mono tabular · Embellishment: Instrument Serif italic · Accent:
+racing lime `#CFFF04` on ink `#07080A`, paper `#F3F1EC`, alert red `#FF2E1F`.
 Screen texture: film grain, carbon-diagonal pattern, oversized outline
-wordmark. No rounded corners, no icon-swirl — broadcast-board language.
+wordmark. Position graph draws mini SVG racing-cars at the tip of every line.
+No rounded corners, no icon-swirl — broadcast-board language.
