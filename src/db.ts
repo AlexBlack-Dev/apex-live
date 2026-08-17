@@ -7,6 +7,7 @@ export interface Driver {
   number: number;
   name: string;
   team: string;
+  color: string;
   baseMs: number;
   jitterMs: number;
 }
@@ -33,13 +34,13 @@ export interface SessionConfig {
   tickMs: number;
 }
 
-const DEFAULT_DRIVERS: ReadonlyArray<readonly [number, string, string, number, number]> = [
-  [11, "V. Reska", "Scuderia Torino", 30500, 260],
-  [7, "A. Kovac", "Nord Motorsport", 30800, 320],
-  [23, "T. Esen", "Lumen Racing", 31100, 290],
-  [5, "R. Okada", "Kita Endurance", 31450, 340],
-  [33, "F. Marchetti", "Rosso Corse", 31900, 310],
-  [96, "M. Solo", "Polar Dynamics", 32400, 360],
+const DEFAULT_DRIVERS: ReadonlyArray<readonly [number, string, string, string, number, number]> = [
+  [11, "V. Reska", "Scuderia Torino", "#ff2e1f", 30500, 260],
+  [7, "A. Kovac", "Nord Motorsport", "#5b9bff", 30800, 320],
+  [23, "T. Esen", "Lumen Racing", "#cfff04", 31100, 290],
+  [5, "R. Okada", "Kita Endurance", "#a78bfa", 31450, 340],
+  [33, "F. Marchetti", "Rosso Corse", "#ff6b3d", 31900, 310],
+  [96, "M. Solo", "Polar Dynamics", "#8e8c86", 32400, 360],
 ];
 
 export class Store {
@@ -60,6 +61,7 @@ export class Store {
         number INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL,
         team TEXT NOT NULL,
+        color TEXT NOT NULL DEFAULT '',
         base_ms INTEGER NOT NULL,
         jitter_ms INTEGER NOT NULL
       );
@@ -79,16 +81,24 @@ export class Store {
       );
     `);
     this.seed();
+    this.migrateColor();
+  }
+
+  private migrateColor(): void {
+    const cols = this.db.prepare("PRAGMA table_info(drivers)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "color")) {
+      this.db.exec("ALTER TABLE drivers ADD COLUMN color TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   private seed(): void {
     const count = this.db.prepare("SELECT COUNT(*) AS n FROM drivers").get() as { n: number };
     if (count.n === 0) {
       const insert = this.db.prepare(
-        "INSERT INTO drivers (number, name, team, base_ms, jitter_ms) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO drivers (number, name, team, color, base_ms, jitter_ms) VALUES (?, ?, ?, ?, ?, ?)"
       );
-      for (const [number, name, team, baseMs, jitterMs] of DEFAULT_DRIVERS) {
-        insert.run(number, name, team, baseMs, jitterMs);
+      for (const [number, name, team, color, baseMs, jitterMs] of DEFAULT_DRIVERS) {
+        insert.run(number, name, team, color, baseMs, jitterMs);
       }
     }
     const has = this.db.prepare("SELECT id FROM session WHERE id = 1").get();
@@ -106,15 +116,9 @@ export class Store {
     return row;
   }
 
-  updateConfig(nominalMs: number, plannedLaps: number, tickMs: number): void {
-    this.db
-      .prepare("UPDATE session SET nominal_ms = ?, planned_laps = ?, tick_ms = ? WHERE id = 1")
-      .run(nominalMs, plannedLaps, tickMs);
-  }
-
   listDrivers(): Driver[] {
     return this.db
-      .prepare("SELECT id, number, name, team, base_ms AS baseMs, jitter_ms AS jitterMs FROM drivers ORDER BY base_ms ASC")
+      .prepare("SELECT id, number, name, team, color, base_ms AS baseMs, jitter_ms AS jitterMs FROM drivers ORDER BY base_ms ASC")
       .all() as Driver[];
   }
 

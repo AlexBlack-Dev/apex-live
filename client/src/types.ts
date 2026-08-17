@@ -1,5 +1,7 @@
 export type DriverState = "racing" | "pit";
 
+export type RacePhase = "idle" | "running" | "paused" | "finished";
+
 export type EventKind = "overtake" | "fastest" | "pit" | "flag" | "system";
 
 export interface Driver {
@@ -7,6 +9,7 @@ export interface Driver {
   number: number;
   name: string;
   team: string;
+  color: string;
   baseMs: number;
   jitterMs: number;
 }
@@ -34,6 +37,7 @@ export interface RaceEvent {
 }
 
 export interface SessionSnapshot {
+  phase: RacePhase;
   running: boolean;
   startedAt: number | null;
   simMs: number;
@@ -44,7 +48,6 @@ export interface SessionSnapshot {
   airTempC: number;
   trackTempC: number;
   humidityPct: number;
-  lastLapAt: number | null;
   mostRecentEvent: string | null;
 }
 

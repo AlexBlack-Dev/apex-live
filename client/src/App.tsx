@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Driver, EventKind, LiveDriver, RaceEvent, RaceSnapshot } from "./types";
+import type { Driver, EventKind, LiveDriver, RaceEvent, RacePhase, RaceSnapshot } from "./types";
+import {
+  IconAlert,
+  IconChevronDown,
+  IconChevronUp,
+  IconPause,
+  IconPlay,
+  IconRotate,
+  IconSwap,
+  IconWrench,
+} from "./icons";
 
 const REPO_URL = "https://github.com/AlexBlack-Dev/redline";
+const BG_VIDEOS = ["/race-bg-1.mp4", "/race-bg-2.mp4", "/race-bg-3.mp4", "/race-bg-4.mp4"];
 
-interface WsState {
-  kind: "connecting" | "online" | "offline";
-}
-
-function formatTime(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
+function formatRaceTime(ms: number): string {
+  const total = Math.max(0, ms) / 1000;
   const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  const s = Math.floor(total % 60);
+  const t = Math.floor((total % 1) * 10);
+  return `${m}:${String(s).padStart(2, "0")}.${t}`;
 }
 
 function formatClock(date: Date): string {
@@ -26,6 +34,11 @@ function formatLap(ms: number | null): string {
 
 function formatGap(ms: number): string {
   return `+${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatDelta(ms: number | null): string {
+  if (ms === null) return "—";
+  return ms <= 0 ? `${(ms / 1000).toFixed(1)}s` : `+${(ms / 1000).toFixed(1)}s`;
 }
 
 const EVENT_LABEL: Record<EventKind, string> = {
@@ -44,57 +57,109 @@ const EVENT_CLASS: Record<EventKind, string> = {
   system: "ev-system",
 };
 
+const PHASE_INFO: Record<RacePhase, { label: string; cls: string }> = {
+  idle: { label: "GRID", cls: "ph-idle" },
+  running: { label: "RACE LIVE", cls: "ph-live" },
+  paused: { label: "PAUSED", cls: "ph-paused" },
+  finished: { label: "FINISHED", cls: "ph-finished" },
+};
+
+type FlashKind = "up" | "down" | "lap" | "best" | null;
+
 function ControlButton(props: {
   label: string;
-  active: boolean;
   onClick: () => void;
   tone?: "lime" | "paper" | "red";
+  icon?: React.ReactNode;
 }): React.ReactElement {
-  const { label, active, onClick, tone = "paper" } = props;
+  const { label, onClick, tone = "paper", icon } = props;
   return (
-    <button
-      type="button"
-      className={`ctl ctl-${tone}${active ? " ctl-active" : ""}`}
-      onClick={onClick}
-    >
+    <button type="button" className={`ctl ctl-${tone}`} onClick={onClick}>
+      {icon && <span className="ctl-ico">{icon}</span>}
       {label}
     </button>
+  );
+}
+
+function LapMeter(props: {
+  done: number;
+  progress: number;
+  planned: number;
+  inPit: boolean;
+}): React.ReactElement {
+  const { done, progress, planned, inPit } = props;
+  return (
+    <span className="laps" aria-label={`${done} of ${planned} laps`}>
+      {Array.from({ length: planned }, (_, i) => {
+        const idx = i + 1;
+        const cls =
+          idx <= done ? "lseg seg-done" : idx === done + 1 && !inPit ? "lseg seg-cur" : "lseg";
+        return (
+          <span
+            key={idx}
+            className={cls}
+            style={
+              idx === done + 1 && !inPit
+                ? { transform: `scaleY(${(0.3 + progress * 0.7).toFixed(2)})` }
+                : undefined
+            }
+          />
+        );
+      })}
+    </span>
   );
 }
 
 function LeaderRow(props: {
   row: LiveDriver;
   driver: Driver;
+  plannedLaps: number;
   isLeader: boolean;
-  flash: "up" | "down" | "lap" | null;
+  flash: FlashKind;
   index: number;
   entering: boolean;
 }): React.ReactElement {
-  const { row, driver, isLeader, flash, index, entering } = props;
-  const delta =
-    row.deltaMs !== null ? (row.deltaMs <= 0 ? `${(row.deltaMs / 1000).toFixed(1)}s` : `+${(row.deltaMs / 1000).toFixed(1)}s`) : null;
+  const { row, driver, plannedLaps, isLeader, flash, index, entering } = props;
+  const cls = [
+    "row",
+    isLeader ? "row-leader" : "",
+    flash ? `flash-${flash}` : "",
+    entering ? "row-enter" : "",
+    row.state === "pit" ? "row-pitting" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const teamColor = driver.color || "var(--faint)";
   return (
     <div
-      className={`row${isLeader ? " row-leader" : ""}${flash ? ` flash-${flash}` : ""}${entering ? " row-enter" : ""}`}
-      style={{ animationDelay: `${index * 34}ms` }}
+      className={cls}
+      style={{ animationDelay: `${index * 34}ms`, "--team": teamColor } as React.CSSProperties}
     >
-      <span className="row-pos">{String(row.position).padStart(2, "0")}</span>
-      <span className="row-num">{String(driver.number).padStart(2, "0")}</span>
+      <span className="row-pos">
+        {flash === "up" && <IconChevronUp className="row-move row-move-up" size={14} />}
+        {flash === "down" && <IconChevronDown className="row-move row-move-down" size={14} />}
+        {String(row.position).padStart(2, "0")}
+      </span>
+      <span className="row-num">
+        <i style={{ background: teamColor }}>{driver.number}</i>
+      </span>
       <span className="row-name">
         <b>{driver.name}</b>
         <i>{driver.team}</i>
       </span>
-      {row.state === "pit" ? (
-        <span className="row-pit" title="in the pits">
-          PIT · {formatTime(row.pitMs)}
-        </span>
-      ) : (
-        <span className="row-lap">{formatLap(row.lastLapMs)}</span>
-      )}
-      <span className={`row-delta${delta !== null && row.deltaMs !== null && row.deltaMs > 0 ? " delta-pos" : delta !== null && row.deltaMs !== null && row.deltaMs < 0 ? " delta-neg" : ""}`}>
-        {delta ?? "—"}
+      <LapMeter done={row.lapsDone} progress={row.progress} planned={plannedLaps} inPit={row.state === "pit"} />
+      <span className="row-last">
+        {row.state === "pit" ? (
+          <em className="pit-badge">
+            <IconWrench size={12} />
+            PIT · {formatRaceTime(row.pitMs)}
+          </em>
+        ) : (
+          formatLap(row.lastLapMs)
+        )}
       </span>
       <span className="row-best">{formatLap(row.bestLapMs)}</span>
+      <span className="row-delta">{formatDelta(row.deltaMs)}</span>
       <span className="row-gap">{isLeader ? "LEAD" : formatGap(row.gapMs)}</span>
     </div>
   );
@@ -112,22 +177,6 @@ function MetricTile(props: { label: string; value: string; right?: string }): Re
   );
 }
 
-function CarMark(props: { className: string }): React.ReactElement {
-  const { className } = props;
-  return (
-    <g className={className}>
-      <rect x="0.6" y="1.0" width="2.0" height="4.5" />
-      <rect x="13.3" y="1.15" width="1.25" height="4.2" />
-      <rect x="2.3" y="0.7" width="1.3" height="0.6" />
-      <rect x="2.3" y="5.2" width="1.3" height="0.6" />
-      <rect x="12.6" y="0.9" width="1.3" height="0.55" />
-      <rect x="12.6" y="5.05" width="1.3" height="0.55" />
-      <path d="M1.6 1.55 Q7 0.7 11.9 1.85 Q13.4 2.25 13.8 2.7 L13.8 3.8 Q13.4 4.25 11.9 4.65 Q7 5.8 1.6 4.95 Q0.8 4.75 0.8 3.25 Q0.8 1.75 1.6 1.55 Z" />
-      <rect className="graph-car-cockpit" x="5.9" y="2.15" width="4.6" height="2.2" />
-    </g>
-  );
-}
-
 function RaceGraph(props: {
   points: Map<number, { lap: number; pos: number }[]>;
   drivers: Driver[];
@@ -136,21 +185,75 @@ function RaceGraph(props: {
 }): React.ReactElement {
   const { points, drivers, leaderId, plannedLaps } = props;
   const W = 720;
-  const H = 200;
-  const PAD = 12;
+  const H = 150;
+  const PAD = 14;
   const maxDrivers = Math.max(6, drivers.length);
-  const x = (lap: number): number => PAD + (lap / (plannedLaps + 0.4)) * (W - PAD * 2);
-  const y = (pos: number): number => PAD + ((pos - 1) / maxDrivers) * (H - PAD * 2);
+  const x = useCallback(
+    (lap: number): number => PAD + (lap / (plannedLaps + 0.4)) * (W - PAD * 2),
+    [plannedLaps]
+  );
+  const y = useCallback(
+    (pos: number): number => PAD + ((pos - 1) / maxDrivers) * (H - PAD * 2),
+    [maxDrivers]
+  );
+
+  const pathsRef = useRef(new Map<number, SVGPathElement>());
+  const prevPtsRef = useRef<Map<number, { lap: number; pos: number }[]>>(new Map());
+  const elapsedRef = useRef(0);
+
+  useEffect(() => {
+    prevPtsRef.current = points;
+  }, [points]);
+
+  useEffect(() => {
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number): void => {
+      raf = requestAnimationFrame(tick);
+      elapsedRef.current += now - last;
+      last = now;
+      const p = Math.min(1, elapsedRef.current / 700);
+      for (const [id, pts] of prevPtsRef.current) {
+        if (pts.length < 2) continue;
+        const p0 = pts[pts.length - 2]!;
+        const p1 = pts[pts.length - 1]!;
+        const cx = x(p0.lap + (p1.lap - p0.lap) * p);
+        const cy = y(p0.pos + (p1.pos - p0.pos) * p);
+        const pathEl = pathsRef.current.get(id);
+        if (pathEl) {
+          let d = "";
+          for (let i = 0; i < pts.length - 2; i++) {
+            d += `${i === 0 ? "M" : "L"}${x(pts[i].lap).toFixed(1)},${y(pts[i].pos).toFixed(1)} `;
+          }
+          if (pts.length === 2) {
+            d += `M${x(p0.lap).toFixed(1)},${y(p0.pos).toFixed(1)} `;
+          }
+          d += `L${cx.toFixed(1)},${cy.toFixed(1)}`;
+          pathEl.setAttribute("d", d);
+        }
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [x, y]);
+
+  const setPathRef = (id: number) => (el: SVGPathElement | null): void => {
+    if (el) pathsRef.current.set(id, el);
+    else pathsRef.current.delete(id);
+  };
 
   const gridLines = [];
   for (let i = 1; i <= plannedLaps; i += 2) {
-    gridLines.push(
-      <line key={`gx${i}`} x1={x(i)} y1={0} x2={x(i)} y2={H} className="graph-grid" />
-    );
+    gridLines.push(<line key={`gx${i}`} x1={x(i)} y1={0} x2={x(i)} y2={H} className="graph-grid" />);
   }
-  for (let i = 1; i < maxDrivers; i++) {
+  for (let i = 1; i <= maxDrivers; i++) {
     gridLines.push(
-      <line key={`gy${i}`} x1={0} y1={y(i)} x2={W} y2={y(i)} className="graph-grid" />
+      <g key={`gy${i}`}>
+        <line x1={0} y1={y(i)} x2={W} y2={y(i)} className="graph-grid" />
+        <text x={PAD - 4} y={y(i) + 3} className="graph-pos">
+          P{i}
+        </text>
+      </g>
     );
   }
 
@@ -161,23 +264,16 @@ function RaceGraph(props: {
         const pts = points.get(driver.id) ?? [];
         if (pts.length < 2) return null;
         const path = pts
-          .map((p, i) => `${i === 0 ? "M" : "L"}${x(p.lap).toFixed(1)},${y(p.pos).toFixed(1)}`)
+          .map((pt, i) => `${i === 0 ? "M" : "L"}${x(pt.lap).toFixed(1)},${y(pt.pos).toFixed(1)}`)
           .join(" ");
-        const last = pts[pts.length - 1]!;
-        const prev = pts[pts.length - 2]!;
-        const cx = x(last.lap);
-        const cy = y(last.pos);
-        const dx = cx - x(prev.lap);
-        const dy = cy - y(prev.pos);
-        const angle = Math.atan2(dy, dx) * (180 / Math.PI);
         const isLeader = driver.id === leaderId;
         return (
-          <g key={driver.id}>
-            <path d={path} className={`graph-line${isLeader ? " graph-lead" : ""}`} />
-            <g transform={`translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${angle.toFixed(1)} 7.5 3.25)`}>
-              <CarMark className={isLeader ? "graph-car-lead" : "graph-car"} />
-            </g>
-          </g>
+          <path
+            key={driver.id}
+            ref={setPathRef(driver.id)}
+            d={path}
+            className={`graph-line${isLeader ? " graph-lead" : ""}`}
+          />
         );
       })}
     </svg>
@@ -196,6 +292,7 @@ function Ticker(props: { events: RaceEvent[] }): React.ReactElement {
       <div className="ticker-track">
         {strip.map((event, index) => (
           <span key={`${event.id}-${index}`} className={`ticker-item ${EVENT_CLASS[event.kind]}`}>
+            <IconAlert className="ticker-ico" size={14} />
             <em>{EVENT_LABEL[event.kind]}</em>
             {event.text}
           </span>
@@ -207,12 +304,39 @@ function Ticker(props: { events: RaceEvent[] }): React.ReactElement {
 
 export default function App(): React.ReactElement {
   const [snapshot, setSnapshot] = useState<RaceSnapshot | null>(null);
-  const [conn, setConn] = useState<WsState>({ kind: "connecting" });
+  const [conn, setConn] = useState<"connecting" | "online" | "offline">("connecting");
   const [clock, setClock] = useState(() => new Date());
+  const [bgIndex, setBgIndex] = useState(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const historyRef = useRef<Map<number, { lap: number; pos: number }[]>>(new Map());
   const prevSnapRef = useRef<RaceSnapshot | null>(null);
-  const [flashes, setFlashes] = useState<Record<number, "up" | "down" | "lap" | null>>({});
+  const [flashes, setFlashes] = useState<Record<number, FlashKind>>({});
   const [entering, setEntering] = useState<Record<number, boolean>>({});
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let fadeTimer: number | undefined;
+    const onLoaded = (): void => {
+      video.style.opacity = "1";
+      const p = video.play();
+      if (p !== undefined) p.catch(() => undefined);
+    };
+    const onEnded = (): void => {
+      video.style.opacity = "0";
+      fadeTimer = window.setTimeout(() => {
+        setBgIndex((index) => (index + 1) % BG_VIDEOS.length);
+      }, 900);
+    };
+    video.style.opacity = "0";
+    video.addEventListener("loadeddata", onLoaded);
+    video.addEventListener("ended", onEnded);
+    return () => {
+      video.removeEventListener("loadeddata", onLoaded);
+      video.removeEventListener("ended", onEnded);
+      if (fadeTimer !== undefined) window.clearTimeout(fadeTimer);
+    };
+  }, [bgIndex]);
 
   useEffect(() => {
     const timer = setInterval(() => setClock(new Date()), 1000);
@@ -222,14 +346,21 @@ export default function App(): React.ReactElement {
   const applySnapshot = useCallback((next: RaceSnapshot) => {
     const prev = prevSnapRef.current;
     if (prev) {
-      const nextFlashes: Record<number, "up" | "down" | "lap" | null> = {};
+      const nextFlashes: Record<number, FlashKind> = {};
       const prevById = new Map(prev.standings.map((s) => [s.driverId, s]));
       for (const s of next.standings) {
         const before = prevById.get(s.driverId);
         if (!before) continue;
         if (s.position < before.position) nextFlashes[s.driverId] = "up";
         else if (s.position > before.position) nextFlashes[s.driverId] = "down";
-        else if (s.lastLapMs !== before.lastLapMs && s.lastLapMs !== null) nextFlashes[s.driverId] = "lap";
+        else if (
+          s.bestLapMs !== null &&
+          (before.bestLapMs === null || s.bestLapMs < before.bestLapMs)
+        ) {
+          nextFlashes[s.driverId] = "best";
+        } else if (s.lastLapMs !== null && s.lastLapMs !== before.lastLapMs) {
+          nextFlashes[s.driverId] = "lap";
+        }
       }
       setFlashes(nextFlashes);
       setTimeout(() => setFlashes({}), 900);
@@ -255,216 +386,250 @@ export default function App(): React.ReactElement {
 
   useEffect(() => {
     let disposed = false;
-    fetch("/api/session")
-      .then((response) => response.json())
-      .then((body: { race: RaceSnapshot }) => {
-        if (!disposed) applySnapshot(body.race);
-      })
-      .catch(() => setConn({ kind: "offline" }));
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
 
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
-    socket.addEventListener("open", () => setConn({ kind: "online" }));
-    socket.addEventListener("close", () => setConn({ kind: "offline" }));
-    socket.addEventListener("error", () => setConn({ kind: "offline" }));
-    socket.addEventListener("message", (event) => {
-      try {
-        const message = JSON.parse(event.data as string) as { type: string; snapshot?: RaceSnapshot };
-        if (message.type === "race" && message.snapshot) applySnapshot(message.snapshot);
-      } catch {
-        setConn({ kind: "offline" });
-      }
-    });
+    const connect = (): void => {
+      setConn("connecting");
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+      socket.addEventListener("open", () => {
+        attempt = 0;
+        setConn("online");
+        fetch("/api/session")
+          .then((response) => response.json())
+          .then((body: { race: RaceSnapshot }) => {
+            if (!disposed) applySnapshot(body.race);
+          })
+          .catch(() => undefined);
+      });
+      socket.addEventListener("message", (event) => {
+        try {
+          const message = JSON.parse(event.data as string) as {
+            type: string;
+            snapshot?: RaceSnapshot;
+          };
+          if (message.type === "race" && message.snapshot) applySnapshot(message.snapshot);
+        } catch {
+          setConn("offline");
+        }
+      });
+      const reconnect = (): void => {
+        if (disposed) return;
+        setConn("offline");
+        const delay = Math.min(2000 * 2 ** attempt, 15000);
+        attempt += 1;
+        retryTimer = setTimeout(connect, delay);
+      };
+      socket.addEventListener("close", reconnect);
+      socket.addEventListener("error", reconnect);
+    };
+
+    connect();
     return () => {
       disposed = true;
-      socket.close();
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close();
     };
   }, [applySnapshot]);
 
-  const control = useCallback((action: "start" | "pause" | "reset") => {
-    void fetch("/api/control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    })
-      .then((response) => response.json())
-      .then((body: { race: RaceSnapshot }) => applySnapshot(body.race))
-      .catch(() => undefined);
-  }, [applySnapshot]);
+  const control = useCallback(
+    (action: "start" | "pause" | "resume" | "reset") => {
+      void fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      })
+        .then((response) => response.json())
+        .then((body: { race: RaceSnapshot }) => applySnapshot(body.race))
+        .catch(() => setConn("offline"));
+    },
+    [applySnapshot]
+  );
 
   const standings = snapshot?.standings ?? [];
   const drivers = snapshot?.drivers ?? [];
   const driverById = useMemo(() => new Map(drivers.map((d) => [d.id, d])), [drivers]);
   const session = snapshot?.session ?? null;
   const leader = standings[0] ?? null;
+  const phase = session?.phase ?? "idle";
+  const phaseInfo = PHASE_INFO[phase];
 
-  const progress = useMemo(() => {
-    if (!session) return 0;
-    const total = session.plannedLaps;
-    const done = Math.max(0, leader?.lapsDone ?? 0);
-    const partial = leader?.state === "racing" ? leader.progress : 0;
-    return Math.min(1, (done + partial) / total);
-  }, [session, leader]);
+  const hasTrack = useMemo(() => {
+    if (!snapshot) return false;
+    return drivers.some((d) => (historyRef.current.get(d.id)?.length ?? 0) >= 2);
+  }, [snapshot, drivers]);
 
-  const stateLabel = session?.running ? "RACE LIVE" : session ? "GRID HOLD" : "OFFLINE";
-  const stateClass = session?.running ? "badge-live" : "badge-idle";
+  const leaderProgress = useMemo(() => {
+    if (!leader) return 0;
+    return leader.state === "pit" ? 0 : leader.progress;
+  }, [leader]);
+
+  const phaseControls =
+    phase === "running" ? (
+      <ControlButton label="PAUSE" icon={<IconPause size={14} />} onClick={() => control("pause")} />
+    ) : phase === "paused" ? (
+      <ControlButton label="RESUME" tone="lime" icon={<IconPlay size={14} />} onClick={() => control("resume")} />
+    ) : (
+      <ControlButton
+        label={phase === "finished" ? "RESTART" : "LIGHTS OUT"}
+        tone="lime"
+        icon={<IconPlay size={14} />}
+        onClick={() => control("start")}
+      />
+    );
 
   return (
     <div className="app">
-      <div className="grain" aria-hidden="true" />
-      <div className="wordmark-bg" aria-hidden="true">
-        REDLINE
-      </div>
+      {phase !== "idle" && (
+        <div className="bg">
+          <video
+            key={bgIndex}
+            className="bg-video"
+            ref={videoRef}
+            muted
+            playsInline
+            preload="auto"
+            aria-hidden="true"
+            src={BG_VIDEOS[bgIndex]}
+          />
+        </div>
+      )}
+      {conn === "offline" && (
+        <div className="offline">
+          <span className="offline-dot" />
+          link lost — reconnecting…
+        </div>
+      )}
 
-      <header className="topbar">
+      <header className="top">
         <div className="brand">
-          <span className="brand-mark">REDLINE</span>
-          <span className="brand-sub">
-            <i>live racing terminal</i>
+          <span className="brand-name">
+            RED<span>LINE</span>
+          </span>
+          <span className="brand-tag">
+            race monitor · <a href={REPO_URL} target="_blank" rel="noreferrer">github</a>
           </span>
         </div>
-        <div className="session-meta">
-          <span className="session-name">
-            The Grand Prix of <i>Lugano</i>
-          </span>
-          <span className="session-night">NIGHT SESSION · ROUND 07</span>
+        <div className="top-status">
+          <span className={`phase ${phaseInfo.cls}`}>{phaseInfo.label}</span>
+          <span
+            className={`dot${phase === "running" ? " dot-live" : ""}${
+              conn === "online" ? "" : conn === "connecting" ? " dot-conn" : " dot-off"
+            }`}
+          />
         </div>
-        <div className="topbar-right">
-          <span className={`live-badge ${stateClass}`}>
-            <span className="live-dot" />
-            {stateLabel}
-          </span>
-          <span className="clock">{formatClock(clock)}</span>
-          <a className="repo-link" href={REPO_URL} target="_blank" rel="noreferrer">
-            SOURCE ↗
-          </a>
+        <div className="top-clock">
+          <span className="clock-time">{formatClock(clock)}</span>
+          <span className="clock-race">race time {session ? formatRaceTime(session.simMs) : "—"}</span>
         </div>
       </header>
 
-      <main className="stage">
-        <section className="timing">
-          <div className="timing-head">
-            <div>
-              <span className="kicker">session 01 — race classification</span>
-              <h1 className="lap-title">
-                LAP&nbsp;{String(session?.currentLap ?? 0).padStart(2, "0")}
-                <em>/</em>
-                {String(session?.plannedLaps ?? 10).padStart(2, "0")}
-              </h1>
-            </div>
-            <div className="controls">
-              <ControlButton
-                label={session?.running ? "PAUSE" : "LIGHTS OUT"}
-                tone="lime"
-                active={!!session?.running}
-                onClick={() => control(session?.running ? "pause" : "start")}
-              />
-              <ControlButton label="RESET" tone="paper" active={false} onClick={() => control("reset")} />
-            </div>
+      <main className="timing">
+        <div className="timing-head">
+          <div className="lap-title">
+            <span className="lap-label">LAP</span>
+            <span className="lap-value">
+              {session ? String(Math.min(session.currentLap + 1, session.plannedLaps)) : "—"}
+            </span>
+            <span className="lap-total">/ {session?.plannedLaps ?? "—"}</span>
           </div>
+          {phaseControls}
+          <ControlButton label="RESET" tone="red" icon={<IconRotate size={14} />} onClick={() => control("reset")} />
+        </div>
 
-          <div className="progress" aria-label="race progress">
-            {Array.from({ length: session?.plannedLaps ?? 10 }, (_, index) => (
-              <span
-                key={index}
-                className={`progress-cell${index < (leader?.lapsDone ?? 0) ? " done" : index === (session?.currentLap ?? 0) - 1 && session?.running ? " now" : ""}`}
-                style={{ width: `${100 / (session?.plannedLaps ?? 10)}%` }}
-              />
-            ))}
+        <div className="board">
+          <div className="board-head">
+            <span className="col-pos">POS</span>
+            <span className="col-num">Nº</span>
+            <span className="col-name">DRIVER</span>
+            <span className="col-laps">LAPS</span>
+            <span className="col-last">LAST</span>
+            <span className="col-best">BEST</span>
+            <span className="col-delta">
+              <IconSwap size={12} />
+            </span>
+            <span className="col-gap">GAP</span>
           </div>
-
-          <div className="leaderboard">
-            <div className="lb-head">
-              <span>POS</span>
-              <span>Nº</span>
-              <span>DRIVER / TEAM</span>
-              <span>LAST</span>
-              <span>Δ</span>
-              <span>BEST</span>
-              <span>GAP</span>
-            </div>
-            {standings.length === 0 && (
-              <div className="lb-empty">loading timing…</div>
-            )}
+          <div className="board-rows">
             {standings.map((row, index) => {
               const driver = driverById.get(row.driverId);
               if (!driver) return null;
               return (
                 <LeaderRow
-                  key={row.driverId}
+                  key={driver.id}
                   row={row}
                   driver={driver}
-                  index={index}
+                  plannedLaps={session?.plannedLaps ?? 0}
                   isLeader={row.position === 1}
-                  flash={flashes[row.driverId] ?? null}
-                  entering={!!entering[row.driverId]}
+                  flash={flashes[driver.id] ?? null}
+                  index={index}
+                  entering={entering[driver.id] ?? false}
                 />
               );
             })}
           </div>
+        </div>
 
-          <footer className="timing-foot">
-            <span>
-              {snapshot?.lapCount ?? 0} completed laps recorded · latest&nbsp;
-              {leader ? `laps: ${leader.lapsDone}` : "—"} · leader P1
-            </span>
-            <span>broadcast tick 0.5 s</span>
-          </footer>
-        </section>
-
-        <aside className="board">
-          <div className="board-block">
-            <span className="kicker">position over laps</span>
-            <div className="graph-wrap">
-              <RaceGraph
-                points={historyRef.current}
-                drivers={drivers}
-                leaderId={session?.leaderId ?? null}
-                plannedLaps={session?.plannedLaps ?? 10}
-              />
-            </div>
+        <div className="graph-panel">
+          <div className="panel-head">
+            <span className="panel-title">POSITION HISTORY</span>
+            {leader && (
+              <span className="panel-sub">
+                leader {driverById.get(leader.driverId)?.name ?? ""} · laps done {session?.leaderLaps ?? 0}
+              </span>
+            )}
           </div>
-
-          <div className="board-block">
-            <span className="kicker">track conditions</span>
-            <div className="tiles">
-              <MetricTile label="AIR" value={(session?.airTempC ?? 0).toFixed(1)} right="°C" />
-              <MetricTile label="TRACK" value={(session?.trackTempC ?? 0).toFixed(1)} right="°C" />
-              <MetricTile label="HUMIDITY" value={String(Math.round(session?.humidityPct ?? 0))} right="%" />
-              <MetricTile label="LEADER PACE" value={leader ? `${(leader.paceMs / 1000).toFixed(1)}` : "—"} right="s" />
-            </div>
+          <div className="race-graph-wrap">
+            <RaceGraph
+              points={snapshot ? new Map(historyRef.current) : new Map()}
+              drivers={drivers}
+              leaderId={session?.leaderId ?? null}
+              plannedLaps={session?.plannedLaps ?? 12}
+            />
+            {!hasTrack && (
+              <div className="graph-empty">
+                no position data yet
+                <em>lights out starts the trace</em>
+              </div>
+            )}
           </div>
-
-          <div className="board-block">
-            <span className="kicker">driver notes</span>
-            <div className="notes">
-              {drivers.slice(0, 6).map((driver) => {
-                const row = standings.find((s) => s.driverId === driver.id);
-                const extra = row?.state === "pit" ? "— pit window" : row ? `P${row.position}` : "—";
-                return (
-                  <div key={driver.id} className="note">
-                    <span className="note-num">{String(driver.number).padStart(2, "0")}</span>
-                    <span className="note-name">{driver.name}</span>
-                    <span className="note-extra">{extra}</span>
-                  </div>
-                );
-              })}
-            </div>
+          <div className="laps-axis">
+            {Array.from({ length: (session?.plannedLaps ?? 12) + 1 }, (_, i) => (
+              <span key={i} className="axis-tick">
+                {i}
+              </span>
+            ))}
           </div>
+        </div>
 
-          <aside className="connection">
-            link: <em className={conn.kind === "online" ? "ok" : conn.kind === "offline" ? "bad" : ""}>{conn.kind}</em>{" "}
-            · websocket broadcast
-          </aside>
-        </aside>
+        <div className="metrics">
+          <MetricTile label="AIR" value={session ? String(session.airTempC) : "—"} right="°C" />
+          <MetricTile label="TRACK" value={session ? String(session.trackTempC) : "—"} right="°C" />
+          <MetricTile label="HUMIDITY" value={session ? String(session.humidityPct) : "—"} right="%" />
+          <MetricTile
+            label="LEADER PACE"
+            value={leader?.paceMs ? `${(leader.paceMs / 1000).toFixed(2)}s` : "—"}
+            right={leader?.state === "pit" ? "PIT" : undefined}
+          />
+          <MetricTile label="LAP" value={session ? String(session.currentLap + 1) : "—"} right={`of ${session?.plannedLaps ?? "—"}`} />
+          <MetricTile label="GRID" value={String(drivers.length)} right="DRIVERS" />
+        </div>
+
+        <Ticker events={snapshot?.events ?? []} />
+
+        <footer className="foot">
+          <span>
+            redline · every lap is a signal — pit stops, gaps and positions stream live over a single
+            websocket.{" "}
+            <a href={REPO_URL} target="_blank" rel="noreferrer">
+              source on github
+            </a>
+            .
+          </span>
+        </footer>
       </main>
-
-      <Ticker events={snapshot?.events ?? []} />
-
-      <footer className="app-foot">
-        <span>REDLINE · live racing terminal — react 19 · node.js · websocket · sqlite</span>
-        <span className="foot-right">tyre window P2–P6 · 10 laps · broadcast every 500 ms</span>
-      </footer>
     </div>
   );
 }

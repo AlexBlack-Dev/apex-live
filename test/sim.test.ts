@@ -86,4 +86,53 @@ describe("RaceRunner", () => {
       }
     }
   });
+
+  it("resume continues the race without resetting laps", async () => {
+    runner.start();
+    await sleep(1400);
+    runner.pause();
+    const lapsAtPause = runner.debugLapsInStore().length;
+    await sleep(700);
+    expect(runner.debugLapsInStore().length).toBe(lapsAtPause);
+    runner.resume();
+    expect(runner.isRunning()).toBe(true);
+    await sleep(1600);
+    expect(runner.debugLapsInStore().length).toBeGreaterThan(lapsAtPause);
+  });
+
+  it("pit stop adds pit time but keeps total time monotonic", async () => {
+    runner.start();
+    await sleep(1600);
+    const target = runner.snapshot().standings[2]!;
+    runner.debugForcePit(target.driverId);
+    await sleep(300);
+    const inPit = runner.snapshot().standings.find((s) => s.driverId === target.driverId)!;
+    expect(inPit.state).toBe("pit");
+    expect(inPit.pitMs).toBeGreaterThan(0);
+    const totalAtPit = inPit.totalMs;
+    await sleep(2600);
+    const stillInPit = runner.snapshot().standings.find((s) => s.driverId === target.driverId)!;
+    expect(stillInPit.totalMs).toBeGreaterThan(totalAtPit);
+    await sleep(6000);
+    const after = runner.snapshot().standings.find((s) => s.driverId === target.driverId)!;
+    expect(after.state).toBe("racing");
+    expect(after.lapsDone).toBeGreaterThanOrEqual(inPit.lapsDone);
+    runner.pause();
+  }, 15000);
+
+  it("finishes the race with a checkered flag for every driver", async () => {
+    runner.close();
+    process.env.RACE_NOMINAL_MS = "300";
+    process.env.RACE_TICK_MS = "50";
+    process.env.RACE_LAPS = "2";
+    runner = new RaceRunner(store);
+    runner.start();
+    await sleep(5200);
+    const snapshot = runner.snapshot();
+    expect(snapshot.session.phase).toBe("finished");
+    expect(snapshot.session.running).toBe(false);
+    expect(snapshot.standings.every((s) => s.lapsDone === 2)).toBe(true);
+    expect(runner.debugLapsInStore()).toHaveLength(12);
+    expect(runner.debugEventsInStore().some((e) => e.text.toLowerCase().includes("checkered"))).toBe(true);
+  }, 10000);
 });

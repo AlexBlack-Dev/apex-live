@@ -73,8 +73,28 @@ describe("REST API", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "pause" }),
     });
-    const frozen = (await paused.json()) as { race: { session: { running: boolean } } };
+    const frozen = (await paused.json()) as { race: { session: { running: boolean; phase: string } } };
     expect(frozen.race.session.running).toBe(false);
+    expect(frozen.race.session.phase).toBe("paused");
+  });
+
+  it("resume restarts the race from the paused state", async () => {
+    const resumed = await fetch(`${base}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "resume" }),
+    });
+    expect(resumed.status).toBe(200);
+    const body = (await resumed.json()) as { race: { session: { running: boolean; phase: string } } };
+    expect(body.race.session.running).toBe(true);
+    expect(body.race.session.phase).toBe("running");
+    await sleep(1200);
+    const frozen = await fetch(`${base}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "pause" }),
+    });
+    expect(frozen.status).toBe(200);
   });
 
   it("reset clears laps and events cursor works after racing", async () => {

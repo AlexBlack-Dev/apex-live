@@ -1,6 +1,7 @@
 import { Store, Driver, Lap, RaceEvent } from "./db.js";
 
 export type DriverState = "racing" | "pit";
+export type RacePhase = "idle" | "running" | "paused" | "finished";
 
 export interface LiveDriver {
   driverId: number;
@@ -18,6 +19,7 @@ export interface LiveDriver {
 }
 
 export interface SessionSnapshot {
+  phase: RacePhase;
   running: boolean;
   startedAt: number | null;
   simMs: number;
@@ -28,7 +30,6 @@ export interface SessionSnapshot {
   airTempC: number;
   trackTempC: number;
   humidityPct: number;
-  lastLapAt: number | null;
   mostRecentEvent: string | null;
 }
 
@@ -45,115 +46,110 @@ interface SimDriver {
   state: DriverState;
   paceMs: number;
   lapsDone: number;
-  lapStartedAt: number;
   partialMs: number;
+  completedMs: number;
   bestLapMs: number | null;
   lastLapMs: number | null;
-  prevTotalMs: number;
-  pitUntilAt: number;
-  pitPaceMs: number;
+  prevLapMs: number | null;
+  pitTotalMs: number;
+  pitEnteredAt: number;
   hasPitted: boolean;
+  justExitedPit: boolean;
 }
 
 const PARKLOT_MS = 7600;
+const MAX_TICK_DT = 5000;
 
 export class RaceRunner {
   private readonly store: Store;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
+  private phase: RacePhase = "idle";
   private startedAt = 0;
-  private simMs = 0;
+  private raceTime = 0;
+  private lastTickAt = 0;
   private drivers: SimDriver[] = [];
   private rallyNominal: number;
   private rallyTicks: number;
   private plannedLaps: number;
+  private paceScale = 1;
+  onTick: (() => void) | null = null;
 
   constructor(store: Store) {
     this.store = store;
     const config = store.getConfig();
-    const baseNominal = config.nominalMs;
     this.rallyNominal = Number(process.env.RACE_NOMINAL_MS ?? config.nominalMs) || 30500;
     this.rallyTicks = Number(process.env.RACE_TICK_MS ?? config.tickMs) || 500;
     this.plannedLaps = Number(process.env.RACE_LAPS ?? config.plannedLaps) || 10;
-    this.paceScale = this.rallyNominal / baseNominal;
+    this.paceScale = this.rallyNominal / config.nominalMs;
     this.resetRunners();
-  }
-
-  private paceScale = 1;
-
-  private resetRunners(): void {
-    this.drivers = this.store.listDrivers().map((driver) => {
-      const paceMs = Math.max(600, Math.round(driver.baseMs * this.paceScale));
-      return {
-        driver,
-        state: "racing" as DriverState,
-        paceMs,
-        lapsDone: 0,
-        lapStartedAt: 0,
-        partialMs: 0,
-        bestLapMs: null,
-        lastLapMs: null,
-        prevTotalMs: 0,
-        pitUntilAt: -1,
-        pitPaceMs: 0,
-        hasPitted: false,
-      };
-    });
   }
 
   isRunning(): boolean {
-    return this.running;
+    return this.phase === "running";
+  }
+
+  getPhase(): RacePhase {
+    return this.phase;
   }
 
   start(): void {
-    if (this.running) return;
+    if (this.phase === "running") return;
+    if (this.phase === "paused") {
+      this.resume();
+      return;
+    }
     this.store.clearLaps();
     this.store.clearEvents();
     this.resetRunners();
-    this.running = true;
+    this.phase = "running";
     this.startedAt = Date.now();
-    this.simMs = 0;
-    for (const s of this.drivers) {
-      s.lapStartedAt = 0;
-      s.partialMs = 0;
-    }
-    this.store.addEvent("flag", "Lights out — the race is on", Date.now());
-    this.timer = setInterval(() => this.tick(), this.rallyTicks);
+    this.raceTime = 0;
+    this.lastTickAt = Date.now();
+    this.store.addEvent("flag", "Lights out — the race is on", this.raceTime);
+    this.startTimer();
   }
 
   pause(): void {
-    if (!this.running) return;
-    this.running = false;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.store.addEvent("flag", "Race paused by control", Date.now());
+    if (this.phase !== "running") return;
+    this.phase = "paused";
+    this.stopTimer();
+    this.store.addEvent("flag", "Race paused by control", this.raceTime);
+  }
+
+  resume(): void {
+    if (this.phase !== "paused") return;
+    this.phase = "running";
+    this.lastTickAt = Date.now();
+    this.store.addEvent("flag", "Race resumed", this.raceTime);
+    this.startTimer();
   }
 
   reset(): void {
-    this.pause();
+    this.stopTimer();
+    this.phase = "idle";
+    this.raceTime = 0;
+    this.lastTickAt = 0;
     this.store.clearLaps();
     this.store.clearEvents();
-    this.store.addEvent("system", "Session reset — grid is set", Date.now());
+    this.store.addEvent("system", "Session reset — grid is set", 0);
     this.resetRunners();
   }
 
-  snapshot(now = Date.now()): RaceSnapshot {
-    const standings = this.computeStandings(now);
+  snapshot(): RaceSnapshot {
+    const standings = this.computeStandings();
     return {
       session: {
-        running: this.running,
-        startedAt: this.running ? this.startedAt : null,
-        simMs: this.simMs,
+        phase: this.phase,
+        running: this.phase === "running",
+        startedAt: this.phase === "running" ? this.startedAt : null,
+        simMs: this.raceTime,
         plannedLaps: this.plannedLaps,
-        currentLap: this.globalLap(now),
+        currentLap: this.globalLap(),
         leaderId: standings[0]?.driverId ?? null,
         leaderLaps: standings[0]?.lapsDone ?? 0,
-        airTempC: 21.4 + Math.sin(this.simMs / 90000) * 1.2,
-        trackTempC: 26.1 + Math.sin(this.simMs / 64000 + 1.7) * 2.4,
-        humidityPct: 44 + Math.cos(this.simMs / 140000) * 6,
-        lastLapAt: standings.some((s) => s.lastLapMs !== null) ? now : null,
+        airTempC: 21.4 + Math.sin(this.raceTime / 90000) * 1.2,
+        trackTempC: 26.1 + Math.sin(this.raceTime / 64000 + 1.7) * 2.4,
+        humidityPct: 44 + Math.cos(this.raceTime / 140000) * 6,
         mostRecentEvent: this.store.listEvents().at(-1)?.text ?? null,
       },
       standings,
@@ -163,151 +159,164 @@ export class RaceRunner {
     };
   }
 
+  private startTimer(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.tick(), this.rallyTicks);
+  }
+
+  private stopTimer(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
   private tick(): void {
-    if (!this.running) return;
-    const step = this.rallyTicks;
-    this.simMs += step;
+    if (this.phase !== "running") return;
+    const standingsBefore = this.computeStandings();
+
     const now = Date.now();
+    const dt = Math.min(Math.max(now - this.lastTickAt, 0), MAX_TICK_DT);
+    this.lastTickAt = now;
+    this.raceTime += dt;
 
     for (const s of this.drivers) {
       if (s.state === "racing") {
-        s.partialMs += step;
-        if (s.partialMs >= s.paceMs) {
-          this.completeLap(s, now);
+        s.partialMs += dt;
+        while (s.partialMs >= s.paceMs) {
+          this.completeLap(s);
         }
-      } else if (now >= s.pitUntilAt) {
-        const lost = Math.round(s.pitPaceMs / 1000);
+      } else if (this.raceTime >= s.pitEnteredAt + PARKLOT_MS) {
+        s.pitTotalMs += PARKLOT_MS;
         s.state = "racing";
-        s.lapStartedAt = now;
         s.partialMs = 0;
+        s.justExitedPit = true;
         this.store.addEvent(
           "pit",
-          `#${s.driver.number} ${s.driver.name} rejoins from the pits (−${lost}s)`,
-          now
+          `#${s.driver.number} ${s.driver.name} rejoins from the pits (−${Math.round(PARKLOT_MS / 1000)}s)`,
+          this.raceTime
         );
       }
     }
 
-    const standingsBefore = this.computeStandings(now - step);
-    const standingsAfter = this.computeStandings(now);
-    const done = this.drivers
-      .map((s) => s.driver.id)
-      .filter((id) => (standingsAfter.find((st) => st.driverId === id)?.lapsDone ?? 0) >= this.plannedLaps);
-    if (done.length === this.drivers.length && this.drivers.length > 0) {
-      this.finishRace(now);
+    const standingsAfter = this.computeStandings();
+
+    if (this.drivers.length > 0 && this.drivers.every((s) => s.lapsDone >= this.plannedLaps)) {
+      this.finishRace();
+      this.onTick?.();
+      return;
     }
 
     for (const after of standingsAfter) {
       const before = standingsBefore.find((st) => st.driverId === after.driverId);
       if (before && after.position < before.position) {
         const sim = this.drivers.find((s) => s.driver.id === after.driverId);
-        if (sim && sim.state === "racing") {
+        if (sim && sim.state === "racing" && !sim.justExitedPit) {
           this.store.addEvent(
             "overtake",
             `#${sim.driver.number} ${sim.driver.name} takes P${after.position}`,
-            now
+            this.raceTime
           );
         }
       }
     }
+
+    for (const s of this.drivers) {
+      s.justExitedPit = false;
+    }
+
+    this.onTick?.();
   }
 
-  private completeLap(s: SimDriver, now: number): void {
+  private completeLap(s: SimDriver): void {
     const noise = 0.965 + Math.random() * 0.07;
     const lapMs = Math.round((s.paceMs * noise) / 10) * 10;
     s.lapsDone += 1;
+    s.prevLapMs = s.lastLapMs;
     s.lastLapMs = lapMs;
+    s.completedMs += lapMs;
+    s.partialMs -= s.paceMs;
     if (s.bestLapMs === null || lapMs < s.bestLapMs) {
       s.bestLapMs = lapMs;
       this.store.addEvent(
         "fastest",
         `#${s.driver.number} ${s.driver.name} sets the fastest lap (${this.formatMs(lapMs)})`,
-        now
+        this.raceTime
       );
     }
-    this.store.addLap(s.driver.id, s.lapsDone, lapMs, now);
-    s.lapStartedAt = now;
-    s.partialMs = 0;
+    this.store.addLap(s.driver.id, s.lapsDone, lapMs, this.raceTime);
     s.paceMs = this.nextPace(s);
 
     if (!s.hasPitted && s.lapsDone >= 2 && s.lapsDone <= 6 && Math.random() < 0.45) {
       s.hasPitted = true;
       s.state = "pit";
-      s.pitPaceMs = PARKLOT_MS;
-      s.pitUntilAt = now + PARKLOT_MS;
+      s.partialMs = 0;
+      s.pitEnteredAt = this.raceTime;
       this.store.addEvent(
         "pit",
         `#${s.driver.number} ${s.driver.name} pits for tyres`,
-        now
+        this.raceTime
       );
     }
   }
 
   private nextPace(s: SimDriver): number {
+    const base = (s.driver.baseMs + s.driver.jitterMs) * this.paceScale;
     const drift = (Math.random() - 0.5) * 0.4;
     const recovery = Math.random() < 0.06 ? 0.9 : 1;
     const next = s.paceMs * (1 + drift * 0.01) * recovery;
-    const min = s.driver.baseMs * 0.96;
-    const max = s.driver.baseMs * 1.08;
+    const min = base * 0.96;
+    const max = base * 1.08;
     return Math.min(max, Math.max(min, next));
   }
 
-  private globalLap(now: number): number {
+  private globalLap(): number {
     const maxLaps = Math.max(1, ...this.drivers.map((s) => s.lapsDone + (s.state === "racing" ? 1 : 0)));
     return Math.min(this.plannedLaps, maxLaps);
   }
 
-  private computeStandings(now: number): LiveDriver[] {
+  private computeStandings(): LiveDriver[] {
     const rows = this.drivers.map((s) => {
       const progress = s.state === "racing" ? Math.min(1, s.partialMs / s.paceMs) : 0;
       const totalMs =
-        this.store.listLaps().filter((l) => l.driverId === s.driver.id).reduce((a, l) => a + l.ms, 0) +
-        (s.state === "racing" ? Math.round(progress * s.paceMs) : 0) +
-        (s.state === "pit" && s.pitUntilAt > 0 ? Math.max(0, now - s.lapStartedAt - 0) : 0);
-      const best =
-        s.bestLapMs ??
-        this.store
-          .listLaps()
-          .filter((l) => l.driverId === s.driver.id)
-          .reduce<number | null>((best, l) => (best === null || l.ms < best ? l.ms : best), null);
-      const lapsDone = this.store.listLaps().filter((l) => l.driverId === s.driver.id).length;
-      const last =
-        this.store
-          .listLaps()
-          .filter((l) => l.driverId === s.driver.id)
-          .at(-1)?.ms ?? null;
-      const prev =
-        this.store
-          .listLaps()
-          .filter((l) => l.driverId === s.driver.id)
-          .at(-2)?.ms ?? null;
+        s.completedMs +
+        s.pitTotalMs +
+        (s.state === "racing" ? s.partialMs : Math.max(0, this.raceTime - s.pitEnteredAt));
       return {
         driverId: s.driver.id,
         totalMs,
-        lapsDone,
-lastLapMs: last ?? null,
-      bestLapMs: best ?? null,
-      deltaMs: last !== null && prev !== null ? last - prev : null,
-      state: s.state,
-      pitMs: s.state === "pit" ? Math.max(0, s.pitUntilAt - now) : 0,
-      paceMs: Math.round(s.paceMs),
-      progress: s.state === "racing" ? Math.min(1, s.partialMs / s.paceMs) : 0,
-    };
+        lapsDone: s.lapsDone,
+        lastLapMs: s.lastLapMs,
+        bestLapMs: s.bestLapMs,
+        deltaMs: s.lastLapMs !== null && s.prevLapMs !== null ? s.lastLapMs - s.prevLapMs : null,
+        state: s.state,
+        pitMs: s.state === "pit" ? Math.max(0, s.pitEnteredAt + PARKLOT_MS - this.raceTime) : 0,
+        paceMs: Math.round(s.paceMs),
+        progress,
+      };
     });
 
     rows.sort((a, b) => {
       if (a.lapsDone !== b.lapsDone) return b.lapsDone - a.lapsDone;
       return a.totalMs - b.totalMs;
     });
-    const leaderTotal = rows[0]?.totalMs ?? 0;
-    const leaderLaps = rows[0]?.lapsDone ?? 0;
+
+    const leader = rows[0];
+    const leaderTotal = leader?.totalMs ?? 0;
+    const leaderLaps = leader?.lapsDone ?? 0;
+    const leaderLapMs = leaderLaps > 0 && leader
+      ? leader.totalMs / leaderLaps
+      : leader?.paceMs ?? 0;
 
     return rows.map((row, index) => ({
       driverId: row.driverId,
       position: index + 1,
       lapsDone: row.lapsDone,
       totalMs: row.totalMs,
-      gapMs: row.totalMs - leaderTotal,
+      gapMs:
+        index === 0
+          ? 0
+          : Math.max(0, (leaderLaps - row.lapsDone) * leaderLapMs + (row.totalMs - leaderTotal)),
       lastLapMs: row.lastLapMs,
       bestLapMs: row.bestLapMs,
       deltaMs: row.deltaMs,
@@ -318,25 +327,46 @@ lastLapMs: last ?? null,
     }));
   }
 
-  private finishRace(now: number): void {
-    this.pause();
-    this.store.addEvent("flag", "Checkered flag — race complete", now);
+  private finishRace(): void {
+    this.phase = "finished";
+    this.stopTimer();
+    this.store.addEvent("flag", "Checkered flag — race complete", this.raceTime);
   }
 
   private formatMs(ms: number): string {
     return `${(ms / 1000).toFixed(1)}s`;
   }
 
-  close(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.running = false;
+  private resetRunners(): void {
+    this.drivers = this.store.listDrivers().map((driver) => ({
+      driver,
+      state: "racing",
+      paceMs: Math.round((driver.baseMs + driver.jitterMs) * this.paceScale),
+      lapsDone: 0,
+      partialMs: 0,
+      completedMs: 0,
+      bestLapMs: null,
+      lastLapMs: null,
+      prevLapMs: null,
+      pitTotalMs: 0,
+      pitEnteredAt: 0,
+      hasPitted: false,
+      justExitedPit: false,
+    }));
   }
 
-  debugSimMs(): number {
-    return this.simMs;
+  close(): void {
+    this.stopTimer();
+    this.phase = "idle";
+  }
+
+  debugForcePit(driverId: number): void {
+    const s = this.drivers.find((d) => d.driver.id === driverId);
+    if (!s || s.state !== "racing" || s.hasPitted) return;
+    s.hasPitted = true;
+    s.state = "pit";
+    s.partialMs = 0;
+    s.pitEnteredAt = this.raceTime;
   }
 
   debugLapsInStore(): Lap[] {

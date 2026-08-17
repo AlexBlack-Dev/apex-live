@@ -1,34 +1,34 @@
 {
-    "name":  "redline",
-    "version":  "1.0.0",
-    "type":  "module",
-    "private":  true,
-    "description":  "REDLINE — real-time racing broadcast platform: pace simulator, live timing, WebSocket push, SQLite race recorder",
-    "license":  "MIT",
-    "scripts":  {
-                    "dev":  "tsx watch src/main.ts",
-                    "start":  "tsx src/main.ts",
-                    "dev:client":  "vite",
-                    "build":  "vite build client",
-                    "typecheck":  "tsc --noEmit",
-                    "test":  "vitest run"
-                },
-    "dependencies":  {
-                         "better-sqlite3":  "^13.0.3",
-                         "react":  "^19.2.8",
-                         "react-dom":  "^19.2.8",
-                         "ws":  "^8.21.3"
-                     },
-    "devDependencies":  {
-                            "@types/better-sqlite3":  "^9.6.0",
-                            "@types/node":  "^26.2.0",
-                            "@types/react":  "^19.2.18",
-                            "@types/react-dom":  "^19.2.4",
-                            "@types/ws":  "^8.18.1",
-                            "@vitejs/plugin-react":  "^6.0.5",
-                            "tsx":  "^4.23.11",
-                            "typescript":  "^7.0.2",
-                            "vite":  "^8.2.1",
-                            "vitest":  "^4.1.10"
-                        }
+    "name": "redline",
+    "version": "1.0.0",
+    "type": "module",
+    "private": true,
+    "description": "REDLINE — real-time racing broadcast platform: pace simulator, live timing, WebSocket push, SQLite race recorder",
+    "license": "MIT",
+    "scripts": {
+        "dev": "tsx watch src/main.ts",
+        "start": "tsx src/main.ts",
+        "dev:client": "vite",
+        "build": "vite build client",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "better-sqlite3": "^13.0.3",
+        "react": "^19.2.8",
+        "react-dom": "^19.2.8",
+        "ws": "^8.21.3"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^9.6.0",
+        "@types/node": "^26.2.0",
+        "@types/react": "^19.2.18",
+        "@types/react-dom": "^19.2.4",
+        "@types/ws": "^8.18.1",
+        "@vitejs/plugin-react": "^6.0.5",
+        "tsx": "^4.23.11",
+        "typescript": "^7.0.2",
+        "vite": "^8.2.1",
+        "vitest": "^4.1.10"
+    }
 }

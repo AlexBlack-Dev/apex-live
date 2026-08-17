@@ -30,7 +30,7 @@ function bootBanner(port: number, dbFile: string): string {
     cell("db", DIM(dbFile)),
     cell("api", DIM("GET /api/session · /api/drivers · /api/laps · /api/events   POST /api/control")),
     sep,
-    cell("control", DIM("POST /api/control {action: start | pause | reset}")),
+    cell("control", DIM("POST /api/control {action: start | pause | resume | reset}")),
     cell("status", CREAM("grid set — waiting for lights out")),
     bottom,
   ];
@@ -38,7 +38,12 @@ function bootBanner(port: number, dbFile: string): string {
 }
 
 async function main(): Promise<void> {
-  const port = Number(process.env.PORT ?? 3004);
+  const rawPort = process.env.PORT ?? "3004";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`invalid PORT "${rawPort}"`);
+    process.exit(1);
+  }
   const dbFile = process.env.DB_FILE ?? path.join(__dirname, "..", "data", "redline.db");
   const autostart = process.argv.includes("--start");
 
@@ -49,7 +54,23 @@ async function main(): Promise<void> {
   const db = new Store(dbFile);
   const runner = new RaceRunner(db);
   const handle = createApp(db, runner, { port });
-  await new Promise<void>((resolve) => setTimeout(resolve, 200));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (handle.port > 0) {
+          clearInterval(timer);
+          resolve();
+        } else if (Date.now() - started > 3000) {
+          clearInterval(timer);
+          reject(new Error("listen timeout"));
+        }
+      }, 25);
+    });
+  } catch {
+    console.error(`failed to listen on 127.0.0.1:${port} — address in use?`);
+    process.exit(1);
+  }
 
   console.log(bootBanner(handle.port, dbFile));
   console.log();
